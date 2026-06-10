@@ -171,6 +171,12 @@ pub fn build(b: *std.Build) !void {
     });
     b.installArtifact(exe);
     exe.root_module.linkLibrary(curl);
+    if (system_ssl and linkage == .static) {
+        // The static library only records header paths; the executable
+        // provides the actual system TLS libraries.
+        exe.root_module.linkSystemLibrary("ssl", .{ .use_pkg_config = .yes });
+        exe.root_module.linkSystemLibrary("crypto", .{ .use_pkg_config = .yes });
+    }
     exe.root_module.addCMacro("HAVE_CONFIG_H", "1");
     if (linkage == .static) exe.root_module.addCMacro("CURL_STATICLIB", "1");
     exe.root_module.addIncludePath(upstream.path("include"));
@@ -320,12 +326,23 @@ pub fn build(b: *std.Build) !void {
     if (use_openssl) {
         // TODO BoringSSL, AWS-LC, LibreSSL, and quictls
         if (system_ssl) {
-            // Link an OpenSSL-API-compatible system TLS library (OpenSSL,
+            // Use an OpenSSL-API-compatible system TLS library (OpenSSL,
             // AWS-LC, BoringSSL) via pkg-config. Lets a consumer that
             // already links its own libssl/libcrypto share one TLS
             // implementation process-wide instead of vendoring OpenSSL.
-            curl.root_module.linkSystemLibrary("ssl", .{ .use_pkg_config = .yes });
-            curl.root_module.linkSystemLibrary("crypto", .{ .use_pkg_config = .yes });
+            //
+            // Only header include paths are recorded on the library module:
+            // naming the libraries here would embed shared objects into the
+            // static archive. The final link must provide libssl/libcrypto
+            // (the curl-cli artifact links them below; library consumers
+            // are expected to link their own).
+            if (linkage == .static) {
+                addPkgConfigIncludes(b, curl.root_module, "libssl");
+                addPkgConfigIncludes(b, curl.root_module, "libcrypto");
+            } else {
+                curl.root_module.linkSystemLibrary("ssl", .{ .use_pkg_config = .yes });
+                curl.root_module.linkSystemLibrary("crypto", .{ .use_pkg_config = .yes });
+            }
         } else if (b.systemIntegrationOption("openssl", .{})) {
             curl.root_module.linkSystemLibrary("openssl", .{});
         } else {
@@ -983,6 +1000,18 @@ pub fn artifact(dependency: *std.Build.Dependency, kind: std.Build.Step.Compile.
         result = inst.artifact;
     }
     return result.?;
+}
+
+/// Add a pkg-config package's include directories to a module without
+/// recording a library dependency.
+fn addPkgConfigIncludes(b: *std.Build, module: *std.Build.Module, package: []const u8) void {
+    const out = b.run(&.{ "pkg-config", "--cflags-only-I", package });
+    var it = std.mem.tokenizeAny(u8, out, " \n\r\t");
+    while (it.next()) |flag| {
+        if (std.mem.startsWith(u8, flag, "-I")) {
+            module.addSystemIncludePath(.{ .cwd_relative = flag[2..] });
+        }
+    }
 }
 
 fn dependentBoolOption(
