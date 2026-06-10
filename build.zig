@@ -157,7 +157,9 @@ pub fn build(b: *std.Build) !void {
     b.installArtifact(curl);
 
     const exe = b.addExecutable(.{
-        .name = "curl",
+        // Distinct from the library artifact so dependency consumers can
+        // resolve .artifact("curl") unambiguously.
+        .name = "curl-cli",
         .root_module = b.createModule(.{
             .target = target,
             .optimize = optimize,
