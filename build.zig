@@ -42,6 +42,11 @@ pub fn build(b: *std.Build) !void {
     const use_zstd = b.option(bool, "zstd", "Use zstd (default: false)") orelse false;
     const enable_ares = b.option(bool, "ares", "Enable c-ares support (default: false)") orelse false;
     const use_apple_idn = b.option(bool, "apple-idn", "Use Apple built-in IDN support (default: false)") orelse false;
+    const system_ssl = b.option(
+        bool,
+        "system-ssl",
+        "Link system libssl/libcrypto via pkg-config instead of vendored OpenSSL (default: false)",
+    ) orelse false;
     const use_libidn2 = b.option(bool, "libidn2", "Use libidn2 for IDN support (default: true)") orelse true;
     const use_librtmp = b.option(bool, "librtmp", "Enable librtmp from rtmpdump (default: false)") orelse false;
     const use_nghttp2 = b.option(bool, "nghttp2", "Use nghttp2 library (default: true)") orelse true;
@@ -312,7 +317,14 @@ pub fn build(b: *std.Build) !void {
 
     if (use_openssl) {
         // TODO BoringSSL, AWS-LC, LibreSSL, and quictls
-        if (b.systemIntegrationOption("openssl", .{})) {
+        if (system_ssl) {
+            // Link an OpenSSL-API-compatible system TLS library (OpenSSL,
+            // AWS-LC, BoringSSL) via pkg-config. Lets a consumer that
+            // already links its own libssl/libcrypto share one TLS
+            // implementation process-wide instead of vendoring OpenSSL.
+            curl.root_module.linkSystemLibrary("ssl", .{ .use_pkg_config = .yes });
+            curl.root_module.linkSystemLibrary("crypto", .{ .use_pkg_config = .yes });
+        } else if (b.systemIntegrationOption("openssl", .{})) {
             curl.root_module.linkSystemLibrary("openssl", .{});
         } else {
             if (b.lazyDependency("openssl", .{
@@ -577,7 +589,7 @@ pub fn build(b: *std.Build) !void {
                 "/usr/local/share/certs/ca-root-nss.crt",
                 "/etc/ssl/cert.pem",
             }) |search_ca_bundle_path| {
-                std.Io.Dir.cwd().access(b.graph.io, search_ca_bundle_path, .{}) catch continue;
+                std.fs.cwd().access(search_ca_bundle_path, .{}) catch continue;
                 // std.log.info("Found CA bundle: {s}", .{search_ca_bundle_path});
                 ca_bundle = search_ca_bundle_path;
                 ca_bundle_set = true;
@@ -587,9 +599,10 @@ pub fn build(b: *std.Build) !void {
 
         if (ca_path_autodetect and !ca_path_set) {
             const search_ca_path: []const u8 = "/etc/ssl/certs";
-            const ca_dir = try std.Io.Dir.cwd().openDir(b.graph.io, search_ca_path, .{ .iterate = true });
+            var ca_dir = try std.fs.cwd().openDir(search_ca_path, .{ .iterate = true });
+            defer ca_dir.close();
             var ca_dir_it = ca_dir.iterate();
-            while (try ca_dir_it.next(b.graph.io)) |item| {
+            while (try ca_dir_it.next()) |item| {
                 if (item.name.len != 10) continue;
                 if (!std.mem.endsWith(u8, item.name, ".0")) continue;
                 for (item.name[0..8]) |c| {
@@ -605,7 +618,7 @@ pub fn build(b: *std.Build) !void {
 
         var ca_embed_set = false;
         if (ca_embed) |embed_path| {
-            if (std.Io.Dir.cwd().access(b.graph.io, embed_path, .{})) |_| {
+            if (std.fs.cwd().access(embed_path, .{})) |_| {
                 ca_embed_set = true;
                 // std.log.info("Found CA bundle to embed: {s}", .{embed_path});
             } else |err| {
